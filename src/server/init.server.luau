@@ -39,6 +39,161 @@ local RespawnEvent = RemoteFolder:FindFirstChild("RespawnEvent") or Instance.new
 RespawnEvent.Name = "RespawnEvent"
 RespawnEvent.Parent = RemoteFolder
 
+local PowerupEvent = RemoteFolder:FindFirstChild("PowerupEvent") or Instance.new("RemoteEvent")
+PowerupEvent.Name = "PowerupEvent"
+PowerupEvent.Parent = RemoteFolder
+
+local AchievementEvent = RemoteFolder:FindFirstChild("AchievementEvent") or Instance.new("RemoteEvent")
+AchievementEvent.Name = "AchievementEvent"
+AchievementEvent.Parent = RemoteFolder
+
+-- High-score persistence (DataStore)
+local GetHighScores = RemoteFolder:FindFirstChild("GetHighScores") or Instance.new("RemoteFunction")
+GetHighScores.Name = "GetHighScores"
+GetHighScores.Parent = RemoteFolder
+
+local TweenService = game:GetService("TweenService")
+local DataStoreService = game:GetService("DataStoreService")
+local highStore = DataStoreService:GetDataStore("VacuumHighScores")
+local HighScores = {}
+
+local AchieveStore = DataStoreService:GetDataStore("VacuumAchievements")
+local PlayerAchievements = {}
+
+local function loadPlayerAchievements(player)
+    local uid = tostring(player.UserId)
+    local ok, data = pcall(function()
+        return AchieveStore:GetAsync(uid)
+    end)
+    if ok and type(data) == "table" then
+        PlayerAchievements[player.UserId] = data
+    else
+        PlayerAchievements[player.UserId] = {}
+    end
+end
+
+local function savePlayerAchievements(player)
+    local uid = tostring(player.UserId)
+    local data = PlayerAchievements[player.UserId] or {}
+    pcall(function()
+        AchieveStore:SetAsync(uid, data)
+    end)
+end
+
+local function grantAchievementToPlayer(player, achievementId, title, desc)
+    if not player then return end
+    local ach = PlayerAchievements[player.UserId]
+    if not ach then
+        loadPlayerAchievements(player)
+        ach = PlayerAchievements[player.UserId]
+    end
+    if ach[achievementId] then return end -- already granted
+    ach[achievementId] = {title = title, desc = desc, time = os.time()}
+    savePlayerAchievements(player)
+    AchievementEvent:FireClient(player, achievementId, title, desc)
+end
+
+do
+    local ok, data = pcall(function()
+        return highStore:GetAsync("HighScores")
+    end)
+    if ok and type(data) == "table" then
+        HighScores = data
+    else
+        HighScores = {}
+    end
+end
+
+local function saveHighScores()
+    pcall(function()
+        highStore:SetAsync("HighScores", HighScores)
+    end)
+end
+
+local function updatePlayerHighScore(player, score)
+    if not player then return end
+    local uid = player.UserId
+    local name = player.Name
+    local found = false
+    for _, entry in ipairs(HighScores) do
+        if entry.userId == uid then
+            found = true
+            if score > entry.score then
+                entry.score = score
+                entry.name = name
+            end
+            break
+        end
+    end
+    if not found then
+        table.insert(HighScores, { userId = uid, name = name, score = score })
+    end
+    table.sort(HighScores, function(a, b) return a.score > b.score end)
+    while #HighScores > 10 do
+        table.remove(HighScores)
+    end
+    saveHighScores()
+end
+
+GetHighScores.OnServerInvoke = function(player)
+    return HighScores
+end
+
+-- ========================================
+-- MODEL VARIANT SPAWNER
+-- Place a model named "RobotVacuumTemplate" into ReplicatedStorage (or Workspace)
+-- and this function will clone 4 color variants and place them in the arena.
+-- ========================================
+local function spawnTemplateVariants()
+    local template = ReplicatedStorage:FindFirstChild("RobotVacuumTemplate") or workspace:FindFirstChild("RobotVacuumTemplate")
+    if not template then
+        warn("RobotVacuumTemplate model not found. Import the model into ReplicatedStorage and name it 'RobotVacuumTemplate'.")
+        return
+    end
+
+    local colors = {"Bright red", "Bright blue", "Bright green", "Deep orange"}
+    local startPositions = {
+        Vector3.new(-25, 1, -25),
+        Vector3.new(25, 1, -25),
+        Vector3.new(-25, 1, 25),
+        Vector3.new(25, 1, 25),
+    }
+
+    local variantsFolder = workspace:FindFirstChild("VacuumVariants") or Instance.new("Folder")
+    variantsFolder.Name = "VacuumVariants"
+    variantsFolder.Parent = workspace
+
+    for i, colorName in ipairs(colors) do
+        local clone = template:Clone()
+        clone.Name = "Vacuum_Model_Variant_" .. i
+        -- recolor parts and meshparts
+        for _, obj in pairs(clone:GetDescendants()) do
+            if obj:IsA("BasePart") or obj:IsA("MeshPart") then
+                pcall(function()
+                    obj.BrickColor = BrickColor.new(colorName)
+                end)
+            elseif obj:IsA("Decal") or obj:IsA("Texture") then
+                -- optional: tint decals by adjusting Transparency or leave as-is
+            end
+        end
+
+        clone.Parent = variantsFolder
+        -- try to move model to position
+        local pos = startPositions[i] or Vector3.new(0, 1, 0)
+        pcall(function()
+            if clone.PrimaryPart then
+                clone:SetPrimaryPartCFrame(CFrame.new(pos + Vector3.new(0, 1, 0)))
+            else
+                clone:MoveTo(pos + Vector3.new(0, 1, 0))
+            end
+        end)
+    end
+    print("Spawned " .. #colors .. " color variants from RobotVacuumTemplate into Workspace.VacuumVariants.")
+end
+
+-- Attempt automatic spawn on server start (only if template present)
+-- Note: spawnTemplateVariants will be called after arena setup to avoid being cleared
+
 
 -- ========================================
 -- SETUP: Clear and Create Arena
@@ -280,8 +435,17 @@ function VacuumRobot:collectDust(dustPart)
             local stats = self.owner:FindFirstChild("leaderstats")
             if stats and stats:FindFirstChild("Score") then
                 stats.Score.Value = stats.Score.Value + 10
+                -- Update persistent high score
+                updatePlayerHighScore(self.owner, stats.Score.Value)
             end
             ScoreUpdate:FireClient(self.owner, self.score)
+            -- achievements: first clean and dust collector
+            if self.dustCleaned >= 1 then
+                grantAchievementToPlayer(self.owner, "first_clean", "First Clean", "Cleaned your first dust")
+            end
+            if self.dustCleaned >= 50 then
+                grantAchievementToPlayer(self.owner, "dust_collector", "Dust Collector", "Cleaned 50 dust pieces")
+            end
         end
     end
 end
@@ -358,6 +522,25 @@ end
 function VacuumRobot:respawn()
     -- Reset state and place at random spawn
     local spawnPos = Vector3.new(math.random(-halfArena + 5, halfArena - 5), 1, math.random(-halfArena + 5, halfArena - 5))
+
+    -- Create a quick visual effect at spawn position (server-side fallback)
+    local effect = Instance.new("Part")
+    effect.Name = "RespawnEffect"
+    effect.Anchored = true
+    effect.CanCollide = false
+    effect.Size = Vector3.new(1, 0.2, 1)
+    effect.Position = spawnPos + Vector3.new(0, 0.2, 0)
+    effect.BrickColor = BrickColor.new("Institutional white")
+    effect.Transparency = 0.6
+    effect.Parent = game.Workspace
+
+    local tweenInfo = TweenInfo.new(0.7, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+    local goal = {Size = Vector3.new(6, 0.2, 6), Transparency = 1}
+    pcall(function()
+        TweenService:Create(effect, tweenInfo, goal):Play()
+    end)
+    game:GetService("Debris"):AddItem(effect, 1)
+
     if self.body and self.body.Parent then
         self.body.CFrame = CFrame.new(spawnPos + Vector3.new(0, 1, 0))
     end
@@ -369,6 +552,60 @@ function VacuumRobot:respawn()
     task.spawn(function()
         self:startAI()
     end)
+
+    -- notify owner client to play respawn effect/sound
+    if self.owner then
+        RespawnEvent:FireClient(self.owner, 0, spawnPos)
+    end
+end
+
+-- Create a VacuumRobot instance from an existing model in the workspace
+function VacuumRobot.fromModel(model, owner)
+    if not model or not model.Parent then return nil end
+    local body = model:FindFirstChild("Body") or model.PrimaryPart
+    if not body then
+        -- try to find any BasePart
+        for _, d in ipairs(model:GetDescendants()) do
+            if d:IsA("BasePart") then
+                body = d
+                break
+            end
+        end
+    end
+    if not body then
+        warn("Cannot create VacuumRobot: model has no body part")
+        return nil
+    end
+
+    local self = setmetatable({}, VacuumRobot)
+    self.model = model
+    self.body = body
+    self.name = model.Name
+    self.color = (body.BrickColor and body.BrickColor.Name) or "Bright blue"
+    self.startPos = body.Position
+    self.score = 0
+    self.dustCleaned = 0
+    self.isActive = true
+    self.direction = CFrame.new()
+    self.lastTurnTime = tick()
+    self.battery = 100
+    self.maxBattery = 100
+    self.owner = owner
+
+    -- ensure physics-ready
+    body.Anchored = false
+    body.CanCollide = true
+
+    -- expose battery attribute for clients
+    self.model:SetAttribute("Battery", self.battery)
+
+    -- initialize physics and AI
+    self:initializePhysics()
+    task.spawn(function()
+        self:startAI()
+    end)
+
+    return self
 end
 
 -- ========================================
@@ -416,6 +653,7 @@ end
 
 Players.PlayerAdded:Connect(function(player)
     makeLeaderstats(player)
+    loadPlayerAchievements(player)
 
     -- Spawn a player-controlled vacuum for them
     local spawnPos = Vector3.new(math.random(-40, 40), 1, math.random(-40, 40))
@@ -425,6 +663,15 @@ Players.PlayerAdded:Connect(function(player)
 
     -- Notify client to start its local UI
     ScoreUpdate:FireClient(player, vacuum.score)
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+    local stats = player:FindFirstChild("leaderstats")
+    if stats and stats:FindFirstChild("Score") then
+        updatePlayerHighScore(player, stats.Score.Value)
+    end
+    -- save achievements
+    savePlayerAchievements(player)
 end)
 
 -- Handle client control requests centrally (fallback)
@@ -469,8 +716,15 @@ local function spawnPowerup(position, ptype)
                     task.wait(8)
                     CONFIG.VACUUM_SPEED = prevSpeed
                 end)
+                -- notify client to play power-up sound/FX
+                if ownerVacuum.owner then
+                    PowerupEvent:FireClient(ownerVacuum.owner, "Speed")
+                end
             else
                 ownerVacuum.battery = math.min(ownerVacuum.maxBattery, ownerVacuum.battery + 40)
+                if ownerVacuum.owner then
+                    PowerupEvent:FireClient(ownerVacuum.owner, "Battery")
+                end
             end
             p:Destroy()
         end
@@ -538,6 +792,20 @@ end
 -- START GAME
 -- ========================================
 GameManager:initialize()
+-- If any template variants were spawned, convert them into active VacuumRobot instances
+local variantsFolder = workspace:FindFirstChild("VacuumVariants")
+if variantsFolder then
+    for _, model in ipairs(variantsFolder:GetChildren()) do
+        if model:IsA("Model") and not model:GetAttribute("_processed") then
+            local vr = VacuumRobot.fromModel(model)
+            if vr then
+                table.insert(GameManager.vacuums, vr)
+                model:SetAttribute("_processed", true)
+                print("Converted variant " .. model.Name .. " into VacuumRobot instance.")
+            end
+        end
+    end
+end
 task.spawn(function()
     GameManager:updateGameTime()
 end)
