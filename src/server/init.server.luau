@@ -24,6 +24,35 @@ local RemoteFolder = ReplicatedStorage:FindFirstChild("VacuumRemotes") or Instan
 RemoteFolder.Name = "VacuumRemotes"
 RemoteFolder.Parent = ReplicatedStorage
 
+-- Studio-only helper: insert an asset into ReplicatedStorage by assetId
+local RunService = game:GetService("RunService")
+local IS_STUDIO = RunService:IsStudio()
+local function tryInsertAssetToReplicatedStorage(assetId, destName)
+    if not RunService:IsStudio() then
+        return false, "Not running in Studio"
+    end
+    local InsertService = game:GetService("InsertService")
+    local ok, model = pcall(function()
+        return InsertService:LoadAsset(assetId)
+    end)
+    if not ok or not model then
+        return false, "LoadAsset failed"
+    end
+    local child = model:GetChildren()[1]
+    if not child then
+        return false, "No child in loaded asset"
+    end
+    child.Name = destName or ("Asset_" .. tostring(assetId))
+    child.Parent = ReplicatedStorage
+    return true, "Inserted"
+end
+
+-- Attempt to import two helpful studio assets if running in Studio
+pcall(function()
+    tryInsertAssetToReplicatedStorage(13195031840, "RobotVacuumTemplate")
+    tryInsertAssetToReplicatedStorage(11208591686, "ExtraTemplate_11208591686")
+end)
+
 local VacuumControl = RemoteFolder:FindFirstChild("VacuumControl") or Instance.new("RemoteEvent")
 VacuumControl.Name = "VacuumControl"
 VacuumControl.Parent = RemoteFolder
@@ -63,11 +92,15 @@ local PlayerAchievements = {}
 
 local function loadPlayerAchievements(player)
     local uid = tostring(player.UserId)
-    local ok, data = pcall(function()
-        return AchieveStore:GetAsync(uid)
-    end)
-    if ok and type(data) == "table" then
-        PlayerAchievements[player.UserId] = data
+    if not IS_STUDIO then
+        local ok, data = pcall(function()
+            return AchieveStore:GetAsync(uid)
+        end)
+        if ok and type(data) == "table" then
+            PlayerAchievements[player.UserId] = data
+        else
+            PlayerAchievements[player.UserId] = {}
+        end
     else
         PlayerAchievements[player.UserId] = {}
     end
@@ -76,9 +109,11 @@ end
 local function savePlayerAchievements(player)
     local uid = tostring(player.UserId)
     local data = PlayerAchievements[player.UserId] or {}
-    pcall(function()
-        AchieveStore:SetAsync(uid, data)
-    end)
+    if not IS_STUDIO then
+        pcall(function()
+            AchieveStore:SetAsync(uid, data)
+        end)
+    end
 end
 
 local function grantAchievementToPlayer(player, achievementId, title, desc)
@@ -95,20 +130,26 @@ local function grantAchievementToPlayer(player, achievementId, title, desc)
 end
 
 do
-    local ok, data = pcall(function()
-        return highStore:GetAsync("HighScores")
-    end)
-    if ok and type(data) == "table" then
-        HighScores = data
+    if not IS_STUDIO then
+        local ok, data = pcall(function()
+            return highStore:GetAsync("HighScores")
+        end)
+        if ok and type(data) == "table" then
+            HighScores = data
+        else
+            HighScores = {}
+        end
     else
         HighScores = {}
     end
 end
 
 local function saveHighScores()
-    pcall(function()
-        highStore:SetAsync("HighScores", HighScores)
-    end)
+    if not IS_STUDIO then
+        pcall(function()
+            highStore:SetAsync("HighScores", HighScores)
+        end)
+    end
 end
 
 local function updatePlayerHighScore(player, score)
@@ -146,50 +187,52 @@ end
 -- and this function will clone 4 color variants and place them in the arena.
 -- ========================================
 local function spawnTemplateVariants()
-    local template = ReplicatedStorage:FindFirstChild("RobotVacuumTemplate") or workspace:FindFirstChild("RobotVacuumTemplate")
-    if not template then
-        warn("RobotVacuumTemplate model not found. Import the model into ReplicatedStorage and name it 'RobotVacuumTemplate'.")
-        return
-    end
-
-    local colors = {"Bright red", "Bright blue", "Bright green", "Deep orange"}
-    local startPositions = {
-        Vector3.new(-25, 1, -25),
-        Vector3.new(25, 1, -25),
-        Vector3.new(-25, 1, 25),
-        Vector3.new(25, 1, 25),
+    local templates = {
+        {name = "RobotVacuumTemplate", colors = {"Bright red", "Bright blue", "Bright green", "Deep orange"}, positions = {
+            Vector3.new(-25, 1, -25), Vector3.new(25, 1, -25), Vector3.new(-25, 1, 25), Vector3.new(25, 1, 25)
+        }},
+        {name = "ExtraTemplate_11208591686", colors = {"Royal purple", "Bright yellow"}, positions = {
+            Vector3.new(0, 1, -25), Vector3.new(0, 1, 25)
+        }}
     }
 
     local variantsFolder = workspace:FindFirstChild("VacuumVariants") or Instance.new("Folder")
     variantsFolder.Name = "VacuumVariants"
     variantsFolder.Parent = workspace
 
-    for i, colorName in ipairs(colors) do
-        local clone = template:Clone()
-        clone.Name = "Vacuum_Model_Variant_" .. i
-        -- recolor parts and meshparts
-        for _, obj in pairs(clone:GetDescendants()) do
-            if obj:IsA("BasePart") or obj:IsA("MeshPart") then
-                pcall(function()
-                    obj.BrickColor = BrickColor.new(colorName)
-                end)
-            elseif obj:IsA("Decal") or obj:IsA("Texture") then
-                -- optional: tint decals by adjusting Transparency or leave as-is
-            end
-        end
+    for _, t in ipairs(templates) do
+        local template = ReplicatedStorage:FindFirstChild(t.name) or workspace:FindFirstChild(t.name)
+        if not template then
+            -- skip missing template silently
+        else
+            -- For each configured position, clone the template without changing its original colors
+            for i = 1, math.max(1, (t.positions and #t.positions) or 1) do
+                local clone = template:Clone()
+                clone.Name = t.name .. "_Variant_" .. i
 
-        clone.Parent = variantsFolder
-        -- try to move model to position
-        local pos = startPositions[i] or Vector3.new(0, 1, 0)
-        pcall(function()
-            if clone.PrimaryPart then
-                clone:SetPrimaryPartCFrame(CFrame.new(pos + Vector3.new(0, 1, 0)))
-            else
-                clone:MoveTo(pos + Vector3.new(0, 1, 0))
+                clone.Parent = variantsFolder
+                -- Remove or sanitize Animation objects in third-party store models so Studio
+                -- doesn't attempt to load private animations and spam the Output.
+                for _, desc in ipairs(clone:GetDescendants()) do
+                    pcall(function()
+                        if desc:IsA("Animation") then
+                            desc.AnimationId = ""
+                        end
+                    end)
+                end
+                -- position the clone at the provided spawn position (preserve original appearance)
+                local pos = (t.positions and t.positions[i]) or Vector3.new(0, 1, 0)
+                pcall(function()
+                    if clone.PrimaryPart then
+                        clone:SetPrimaryPartCFrame(CFrame.new(pos + Vector3.new(0, 1, 0)))
+                    else
+                        clone:MoveTo(pos + Vector3.new(0, 1, 0))
+                    end
+                end)
             end
-        end)
+            print("Spawned variants for template: " .. t.name)
+        end
     end
-    print("Spawned " .. #colors .. " color variants from RobotVacuumTemplate into Workspace.VacuumVariants.")
 end
 
 -- Attempt automatic spawn on server start (only if template present)
@@ -461,16 +504,7 @@ function VacuumRobot:initializePhysics()
         end
     end)
 
-    -- If this vacuum is player-controlled, listen for control updates
-    if self.owner then
-        self.controlConn = VacuumControl.OnServerEvent:Connect(function(player, dirVector)
-            if player == self.owner and typeof(dirVector) == "Vector3" then
-                if dirVector.Magnitude > 0 then
-                    self.direction = CFrame.new(self.body.Position, self.body.Position + dirVector.Unit)
-                end
-            end
-        end)
-    end
+    -- Player control is handled centrally on the server to avoid per-instance event hooks
 end
 
 function VacuumRobot:onTouched(hit)
@@ -566,6 +600,19 @@ function VacuumRobot:startAI()
         local moveDirection = self.direction.LookVector
         self.bodyVelocity.Velocity = moveDirection * CONFIG.VACUUM_SPEED
         self.bodyGyro.CFrame = self.direction
+
+        -- Proximity-based dust collection fallback (for anchors/non-collidable dust)
+        pcall(function()
+            local collectRadius = math.max(1, CONFIG.VACUUM_SIZE * 0.8)
+            for _, dust in pairs(game.Workspace:GetChildren()) do
+                if dust and dust:IsA("BasePart") and dust.Name == "Dust" and dust.Parent then
+                    local dist = (dust.Position - self.body.Position).Magnitude
+                    if dist <= collectRadius then
+                        self:collectDust(dust)
+                    end
+                end
+            end
+        end)
     end
 end
 
@@ -718,7 +765,7 @@ local function makeLeaderstats(player)
     score.Parent = leaderstats
 end
 
-Players.PlayerAdded:Connect(function(player)
+local function handlePlayerJoined(player)
     makeLeaderstats(player)
     loadPlayerAchievements(player)
 
@@ -730,7 +777,17 @@ Players.PlayerAdded:Connect(function(player)
 
     -- Notify client to start its local UI
     ScoreUpdate:FireClient(player, vacuum.score)
-end)
+end
+
+Players.PlayerAdded:Connect(handlePlayerJoined)
+
+-- Ensure players who were already connected when this script started get initialized
+for _, player in ipairs(Players:GetPlayers()) do
+    -- skip if already handled (leaderstats presence is a quick check)
+    if not player:FindFirstChild("leaderstats") then
+        handlePlayerJoined(player)
+    end
+end
 
 Players.PlayerRemoving:Connect(function(player)
     local stats = player:FindFirstChild("leaderstats")
@@ -742,12 +799,31 @@ Players.PlayerRemoving:Connect(function(player)
 end)
 
 -- Handle client control requests centrally (fallback)
+local _lastControlAt = {}
+local CONTROL_MIN_INTERVAL = 1 / 20 -- 20 Hz per player
+
 VacuumControl.OnServerEvent:Connect(function(player, moveVector)
+    if not player or not player.UserId then return end
+    local uid = player.UserId
+    local now = tick()
+    local last = _lastControlAt[uid] or 0
+    if now - last < CONTROL_MIN_INTERVAL then
+        return -- drop overly-frequent inputs
+    end
+    _lastControlAt[uid] = now
+
+    if typeof(moveVector) ~= "Vector3" then return end
+
     -- find player's vacuum and set direction
     for _, v in ipairs(GameManager.vacuums) do
         if v.owner == player then
-            if typeof(moveVector) == "Vector3" and moveVector.Magnitude > 0 then
-                v.direction = CFrame.new(v.body.Position, v.body.Position + moveVector.Unit)
+            if moveVector.Magnitude > 0 and v.body and v.body.Parent then
+                local success, _ = pcall(function()
+                    v.direction = CFrame.new(v.body.Position, v.body.Position + moveVector.Unit)
+                end)
+                if not success then
+                    -- ignore malformed updates
+                end
             end
             break
         end

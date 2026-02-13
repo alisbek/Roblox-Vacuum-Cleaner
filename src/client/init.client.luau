@@ -70,10 +70,21 @@ local function updateInput()
 	end
 end
 
--- Throttle sending input to server
+-- Throttle sending input to server (limit rate and send only on change)
+local lastSend = 0
+local sendInterval = 1 / 20 -- 20 Hz
+local lastVector = Vector3.new(0, 0, 0)
 RunService.RenderStepped:Connect(function()
 	updateInput()
-	VacuumControl:FireServer(inputVector)
+	local now = tick()
+	if (inputVector - lastVector).Magnitude > 0.01 or (now - lastSend) >= sendInterval then
+		-- safeguard: only send small number of events per second
+		pcall(function()
+			VacuumControl:FireServer(inputVector)
+		end)
+		lastSend = now
+		lastVector = inputVector
+	end
 end)
 
 -- ===== Minimap UI =====
@@ -357,7 +368,7 @@ end)
 
 -- Respawn event: show countdown
 local RespawnEvent = remotes:WaitForChild("RespawnEvent")
-RespawnEvent.OnClientEvent:Connect(function(seconds)
+RespawnEvent.OnClientEvent:Connect(function(seconds, spawnPos)
 	if seconds and seconds > 0 then
 		respawnLabel.Visible = true
 		for i = seconds, 1, -1 do
@@ -369,7 +380,6 @@ RespawnEvent.OnClientEvent:Connect(function(seconds)
 	else
 		-- seconds == 0 -> immediate respawn effect at provided position
 		respawnLabel.Visible = false
-		local spawnPos = select(2, ...) or nil
 		if spawnPos and typeof(spawnPos) == "Vector3" then
 			-- create visual ping on client's minimap and world
 			local ping = Instance.new("Part")
