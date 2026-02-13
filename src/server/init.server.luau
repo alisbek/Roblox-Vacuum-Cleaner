@@ -11,6 +11,7 @@ local CONFIG = {
     FLOOR_HEIGHT = 1,
     WALL_HEIGHT = 10,
     INITIAL_DUST = 100,
+    INITIAL_DUST_VISIBLE = 140,
     DUST_RESPAWN_RATE = 0.5, -- Dust per second
     VACUUM_COUNT = 3,
     GAME_DURATION = 300, -- 5 minutes
@@ -254,6 +255,60 @@ createObstacle(Vector3.new(0, 1, 0), Vector3.new(10, 2, 10), "Reddish brown")
 createObstacle(Vector3.new(30, 1, 30), Vector3.new(8, 2, 8), "Dark stone grey")
 createObstacle(Vector3.new(-30, 1, -30), Vector3.new(12, 2, 6), "Dark red")
 
+-- Spawn template variants after arena is set up so they aren't destroyed by the clear
+spawnTemplateVariants()
+
+-- ===== Room Decorations =====
+-- Rug
+local rug = Instance.new("Part")
+rug.Name = "Rug"
+rug.Size = Vector3.new(30, 0.2, 20)
+rug.Position = Vector3.new(0, 0.6, 0)
+rug.Anchored = true
+rug.BrickColor = BrickColor.new("Pastel brown")
+rug.Material = Enum.Material.Fabric
+rug.Parent = game.Workspace
+
+-- Coffee table
+local tableTop = Instance.new("Part")
+tableTop.Name = "CoffeeTable"
+tableTop.Size = Vector3.new(6, 0.6, 3)
+tableTop.Position = Vector3.new(0, 1.2, 0)
+tableTop.Anchored = true
+tableTop.BrickColor = BrickColor.new("Reddish brown")
+tableTop.Parent = game.Workspace
+
+local tableLeg = Instance.new("Part")
+tableLeg.Size = Vector3.new(0.6, 1.2, 0.6)
+tableLeg.Position = Vector3.new(0, 0.6, 0)
+tableLeg.Anchored = true
+tableLeg.BrickColor = BrickColor.new("Reddish brown")
+tableLeg.Parent = game.Workspace
+
+-- Couch (simple block)
+local couch = Instance.new("Part")
+couch.Name = "Couch"
+couch.Size = Vector3.new(12, 2, 4)
+couch.Position = Vector3.new(-20, 1, 0)
+couch.Anchored = true
+couch.BrickColor = BrickColor.new("Bright red")
+couch.Material = Enum.Material.SmoothPlastic
+couch.Parent = game.Workspace
+
+-- Floor lamp
+local lampBase = Instance.new("Part")
+lampBase.Name = "LampBase"
+lampBase.Size = Vector3.new(0.6, 6, 0.6)
+lampBase.Position = Vector3.new(18, 3, -10)
+lampBase.Anchored = true
+lampBase.BrickColor = BrickColor.new("Dark stone grey")
+lampBase.Parent = game.Workspace
+
+local lampLight = Instance.new("PointLight")
+lampLight.Parent = lampBase
+lampLight.Brightness = 2
+lampLight.Range = 20
+
 -- ========================================
 -- DUST SYSTEM
 -- ========================================
@@ -267,15 +322,26 @@ function DustManager:spawnDust(count)
         dust.Shape = Enum.PartType.Ball
         dust.Size = Vector3.new(0.6, 0.6, 0.6)
         dust.BrickColor = BrickColor.new("Dark stone grey")
-        dust.Material = Enum.Material.Fabric
+        dust.Material = Enum.Material.SmoothPlastic
         dust.CanCollide = false
-        dust.CFrame = CFrame.new(
-            Vector3.new(
-                math.random(-halfArena + 5, halfArena - 5),
-                2,
-                math.random(-halfArena + 5, halfArena - 5)
-            )
-        )
+        dust.Anchored = true
+
+        -- Random position within the arena, sitting just above the floor
+        local rx = math.random(-halfArena + 5, halfArena - 5)
+        local rz = math.random(-halfArena + 5, halfArena - 5)
+        local ry = CONFIG.FLOOR_HEIGHT + 0.6
+        dust.Position = Vector3.new(rx, ry, rz)
+
+        -- Add a faint particle emitter so dust looks fuzzy and visible
+        local pe = Instance.new("ParticleEmitter")
+        pe.Texture = "rbxassetid://6023426913" -- small dust particle texture (example)
+        pe.Rate = 5
+        pe.Lifetime = NumberRange.new(0.4)
+        pe.Speed = NumberRange.new(0)
+        pe.Size = NumberSequence.new(0.3)
+        pe.LightInfluence = 0
+        pe.Parent = dust
+
         dust.Parent = game.Workspace
         dustCount = dustCount + 1
     end
@@ -289,12 +355,13 @@ function DustManager:removeDust(dustPart)
 end
 
 -- Initial dust spawn
-DustManager:spawnDust(CONFIG.INITIAL_DUST)
+-- Initial dust spawn (use visible count)
+DustManager:spawnDust(CONFIG.INITIAL_DUST_VISIBLE)
 
 -- Continuous dust respawning
 game:GetService("RunService").Heartbeat:Connect(function()
-    if dustCount < CONFIG.INITIAL_DUST then
-        local toSpawn = math.ceil((CONFIG.INITIAL_DUST - dustCount) * CONFIG.DUST_RESPAWN_RATE / 60)
+    if dustCount < CONFIG.INITIAL_DUST_VISIBLE then
+        local toSpawn = math.ceil((CONFIG.INITIAL_DUST_VISIBLE - dustCount) * CONFIG.DUST_RESPAWN_RATE / 60)
         DustManager:spawnDust(toSpawn)
     end
 end)
