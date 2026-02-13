@@ -1,0 +1,506 @@
+-- ========================================
+-- ROBOT VACUUM CLEANER GAME
+-- A fun competitive cleaning game
+-- ========================================
+
+-- ========================================
+-- GAME CONFIGURATION
+-- ========================================
+local CONFIG = {
+    ARENA_SIZE = 120,
+    FLOOR_HEIGHT = 1,
+    WALL_HEIGHT = 10,
+    INITIAL_DUST = 100,
+    DUST_RESPAWN_RATE = 0.5, -- Dust per second
+    VACUUM_COUNT = 3,
+    GAME_DURATION = 300, -- 5 minutes
+    VACUUM_SPEED = 25,
+    VACUUM_SIZE = 3,
+}
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RemoteFolder = ReplicatedStorage:FindFirstChild("VacuumRemotes") or Instance.new("Folder")
+RemoteFolder.Name = "VacuumRemotes"
+RemoteFolder.Parent = ReplicatedStorage
+
+local VacuumControl = RemoteFolder:FindFirstChild("VacuumControl") or Instance.new("RemoteEvent")
+VacuumControl.Name = "VacuumControl"
+VacuumControl.Parent = RemoteFolder
+
+local SpawnRequest = RemoteFolder:FindFirstChild("SpawnRequest") or Instance.new("RemoteEvent")
+SpawnRequest.Name = "SpawnRequest"
+SpawnRequest.Parent = RemoteFolder
+
+local ScoreUpdate = RemoteFolder:FindFirstChild("ScoreUpdate") or Instance.new("RemoteEvent")
+ScoreUpdate.Name = "ScoreUpdate"
+ScoreUpdate.Parent = RemoteFolder
+
+
+-- ========================================
+-- SETUP: Clear and Create Arena
+-- ========================================
+for _, child in game.Workspace:GetChildren() do
+    if child.Name ~= "Terrain" then
+        child:Destroy()
+    end
+end
+
+local floor = Instance.new("Part")
+floor.Name = "GameFloor"
+floor.Size = Vector3.new(CONFIG.ARENA_SIZE, CONFIG.FLOOR_HEIGHT, CONFIG.ARENA_SIZE)
+floor.Position = Vector3.new(0, 0, 0)
+floor.Anchored = true
+floor.BrickColor = BrickColor.new("Light gray")
+floor.Material = Enum.Material.Concrete
+floor.TopSurface = Enum.SurfaceType.Smooth
+floor.BottomSurface = Enum.SurfaceType.Smooth
+floor.Parent = game.Workspace
+
+-- Create walls
+local function createWall(position, size)
+    local wall = Instance.new("Part")
+    wall.Name = "Wall"
+    wall.Size = size
+    wall.Position = position
+    wall.Anchored = true
+    wall.BrickColor = BrickColor.new("Medium stone grey")
+    wall.Material = Enum.Material.Concrete
+    wall.CanCollide = true
+    wall.Parent = game.Workspace
+    return wall
+end
+
+local halfArena = CONFIG.ARENA_SIZE / 2 + 1
+createWall(Vector3.new(0, CONFIG.WALL_HEIGHT / 2, halfArena), Vector3.new(CONFIG.ARENA_SIZE, CONFIG.WALL_HEIGHT, 2))
+createWall(Vector3.new(0, CONFIG.WALL_HEIGHT / 2, -halfArena), Vector3.new(CONFIG.ARENA_SIZE, CONFIG.WALL_HEIGHT, 2))
+createWall(Vector3.new(halfArena, CONFIG.WALL_HEIGHT / 2, 0), Vector3.new(2, CONFIG.WALL_HEIGHT, CONFIG.ARENA_SIZE))
+createWall(Vector3.new(-halfArena, CONFIG.WALL_HEIGHT / 2, 0), Vector3.new(2, CONFIG.WALL_HEIGHT, CONFIG.ARENA_SIZE))
+
+-- Create obstacles (furniture)
+local function createObstacle(position, size, color)
+    local obs = Instance.new("Part")
+    obs.Name = "Obstacle"
+    obs.Size = size
+    obs.Position = position
+    obs.Anchored = true
+    obs.BrickColor = BrickColor.new(color)
+    obs.Material = Enum.Material.Wood
+    obs.CanCollide = true
+    obs.Parent = game.Workspace
+    return obs
+end
+
+-- Add some obstacles to make it more interesting
+createObstacle(Vector3.new(0, 1, 0), Vector3.new(10, 2, 10), "Reddish brown")
+createObstacle(Vector3.new(30, 1, 30), Vector3.new(8, 2, 8), "Dark stone grey")
+createObstacle(Vector3.new(-30, 1, -30), Vector3.new(12, 2, 6), "Dark red")
+
+-- ========================================
+-- DUST SYSTEM
+-- ========================================
+local DustManager = {}
+local dustCount = 0
+
+function DustManager:spawnDust(count)
+    for i = 1, count do
+        local dust = Instance.new("Part")
+        dust.Name = "Dust"
+        dust.Shape = Enum.PartType.Ball
+        dust.Size = Vector3.new(0.6, 0.6, 0.6)
+        dust.BrickColor = BrickColor.new("Dark stone grey")
+        dust.Material = Enum.Material.Fabric
+        dust.CanCollide = false
+        dust.CFrame = CFrame.new(
+            Vector3.new(
+                math.random(-halfArena + 5, halfArena - 5),
+                2,
+                math.random(-halfArena + 5, halfArena - 5)
+            )
+        )
+        dust.Parent = game.Workspace
+        dustCount = dustCount + 1
+    end
+end
+
+function DustManager:removeDust(dustPart)
+    if dustPart and dustPart.Parent then
+        dustPart:Destroy()
+        dustCount = dustCount - 1
+    end
+end
+
+-- Initial dust spawn
+DustManager:spawnDust(CONFIG.INITIAL_DUST)
+
+-- Continuous dust respawning
+game:GetService("RunService").Heartbeat:Connect(function()
+    if dustCount < CONFIG.INITIAL_DUST then
+        local toSpawn = math.ceil((CONFIG.INITIAL_DUST - dustCount) * CONFIG.DUST_RESPAWN_RATE / 60)
+        DustManager:spawnDust(toSpawn)
+    end
+end)
+
+-- ========================================
+-- VACUUM ROBOT CLASS
+-- ========================================
+local VacuumRobot = {}
+VacuumRobot.__index = VacuumRobot
+
+function VacuumRobot.new(name, color, startPos)
+    local self = setmetatable({}, VacuumRobot)
+    
+    self.name = name
+    self.color = color
+    self.startPos = startPos
+    self.score = 0
+    self.dustCleaned = 0
+    self.isActive = true
+    self.direction = CFrame.new()
+    self.lastTurnTime = tick()
+    self.battery = 100
+    self.maxBattery = 100
+    self.owner = nil -- will be set for player-controlled vacuums
+    
+    self:createModel()
+    self:initializePhysics()
+    self:startAI()
+    
+    return self
+end
+
+function VacuumRobot:createModel()
+    self.model = Instance.new("Model", game.Workspace)
+    self.model.Name = self.name
+    
+    -- Main body (disc shape)
+    self.body = Instance.new("Part")
+    self.body.Name = "Body"
+    self.body.Shape = Enum.PartType.Cylinder
+    self.body.Size = Vector3.new(1, CONFIG.VACUUM_SIZE, CONFIG.VACUUM_SIZE)
+    self.body.Position = self.startPos + Vector3.new(0, 1, 0)
+    self.body.Orientation = Vector3.new(0, 0, 90)
+    self.body.BrickColor = BrickColor.new(self.color)
+    self.body.Material = Enum.Material.Plastic
+    self.body.CanCollide = true
+    self.body.Parent = self.model
+    
+    -- LED Light indicator
+    local light = Instance.new("PointLight")
+    light.Brightness = 2
+    light.Range = 15
+    light.Parent = self.body
+    
+    -- Top decorative ring
+    local ring = Instance.new("Part")
+    ring.Name = "Ring"
+    ring.Shape = Enum.PartType.Cylinder
+    ring.Size = Vector3.new(0.2, CONFIG.VACUUM_SIZE + 0.5, CONFIG.VACUUM_SIZE + 0.5)
+    ring.Position = self.body.Position + Vector3.new(0.3, 0, 0)
+    ring.Orientation = Vector3.new(0, 0, 90)
+    ring.BrickColor = BrickColor.new("Black")
+    ring.CanCollide = false
+    ring.Parent = self.model
+    
+    local weld = Instance.new("WeldConstraint")
+    weld.Part0 = ring
+    weld.Part1 = self.body
+    weld.Parent = ring
+end
+
+function VacuumRobot:initializePhysics()
+    -- BodyVelocity for movement
+    self.bodyVelocity = Instance.new("BodyVelocity")
+    self.bodyVelocity.Velocity = Vector3.new(0, 0, 0)
+    self.bodyVelocity.MaxForce = Vector3.new(100000, 0, 100000)
+    self.bodyVelocity.Parent = self.body
+    
+    -- BodyGyro for rotation
+    self.bodyGyro = Instance.new("BodyGyro")
+    self.bodyGyro.MaxTorque = Vector3.new(0, 400000, 0)
+    self.bodyGyro.D = 500
+    self.bodyGyro.P = 10000
+    self.bodyGyro.Parent = self.body
+    
+    -- Collision detection
+    self.body.Touched:Connect(function(hit)
+        self:onTouched(hit)
+    end)
+
+    -- If this vacuum is player-controlled, listen for control updates
+    if self.owner then
+        self.controlConn = VacuumControl.OnServerEvent:Connect(function(player, dirVector)
+            if player == self.owner and typeof(dirVector) == "Vector3" then
+                if dirVector.Magnitude > 0 then
+                    self.direction = CFrame.new(self.body.Position, self.body.Position + dirVector.Unit)
+                end
+            end
+        end)
+    end
+end
+
+function VacuumRobot:onTouched(hit)
+    if hit.Name == "Dust" then
+        self:collectDust(hit)
+    elseif hit.Name == "Wall" or hit.Name == "Obstacle" then
+        self:avoidObstacle()
+    end
+end
+
+function VacuumRobot:collectDust(dustPart)
+    if dustPart and dustPart.Parent then
+        DustManager:removeDust(dustPart)
+        self.dustCleaned = self.dustCleaned + 1
+        self.score = self.score + 10
+        
+        -- Visual feedback
+        local sparkles = Instance.new("Part")
+        sparkles.Name = "Sparkle"
+        sparkles.Shape = Enum.PartType.Ball
+        sparkles.Size = Vector3.new(0.5, 0.5, 0.5)
+        sparkles.Position = dustPart.Position
+        sparkles.BrickColor = BrickColor.new("Bright yellow")
+        sparkles.CanCollide = false
+        sparkles.Parent = game.Workspace
+        game:GetService("Debris"):AddItem(sparkles, 0.3)
+        -- If owned by a player, update leaderstats and notify client
+        if self.owner and self.owner.Parent then
+            local stats = self.owner:FindFirstChild("leaderstats")
+            if stats and stats:FindFirstChild("Score") then
+                stats.Score.Value = stats.Score.Value + 10
+            end
+            ScoreUpdate:FireClient(self.owner, self.score)
+        end
+    end
+end
+
+function VacuumRobot:avoidObstacle()
+    -- Turn away and reverse
+    local randomAngle = math.rad(math.random(60, 150))
+    self.direction = self.direction * CFrame.Angles(0, randomAngle, 0)
+    self.lastTurnTime = tick()
+end
+
+function VacuumRobot:startAI()
+    while self.isActive do
+        task.wait(0.1)
+        
+        -- Battery drain
+        self.battery = math.max(0, self.battery - 0.02)
+        
+        -- If battery dead, stop
+        if self.battery <= 0 then
+            self.bodyVelocity.Velocity = Vector3.new(0, 0, 0)
+            continue
+        end
+        
+        -- Random turning behavior
+        local timeSinceTurn = tick() - self.lastTurnTime
+        if timeSinceTurn > math.random(3, 8) then
+            local randomAngle = math.rad(math.random(-45, 45))
+            self.direction = self.direction * CFrame.Angles(0, randomAngle, 0)
+            self.lastTurnTime = tick()
+        end
+        
+        -- Find nearest dust and move towards it
+        local nearestDust = self:findNearestDust()
+        if nearestDust then
+            local direction = (nearestDust.Position - self.body.Position).Unit
+            self.direction = CFrame.new(self.body.Position, self.body.Position + direction)
+        end
+        
+        -- Move in current direction
+        local moveDirection = self.direction.LookVector
+        self.bodyVelocity.Velocity = moveDirection * CONFIG.VACUUM_SPEED
+        self.bodyGyro.CFrame = self.direction
+    end
+end
+
+function VacuumRobot:findNearestDust()
+    local nearestDust = nil
+    local nearestDistance = 30 -- Detection range
+    
+    for _, dust in pairs(game.Workspace:GetChildren()) do
+        if dust.Name == "Dust" then
+            local distance = (dust.Position - self.body.Position).Magnitude
+            if distance < nearestDistance then
+                nearestDistance = distance
+                nearestDust = dust
+            end
+        end
+    end
+    
+    return nearestDust
+end
+
+-- ========================================
+-- GAME MANAGER
+-- ========================================
+local GameManager = {}
+GameManager.vacuums = {}
+GameManager.gameActive = true
+GameManager.gameTime = CONFIG.GAME_DURATION
+
+function GameManager:initialize()
+    -- Create multiple vacuums with different colors
+    local colors = {"Deep orange", "Bright blue", "Bright green"}
+    local positions = {
+        Vector3.new(-30, 1, -30),
+        Vector3.new(30, 1, 30),
+        Vector3.new(0, 1, -40)
+    }
+    
+    for i = 1, CONFIG.VACUUM_COUNT do
+        local vacuum = VacuumRobot.new(
+            "Vacuum_" .. i,
+            colors[i],
+            positions[i]
+        )
+        table.insert(self.vacuums, vacuum)
+    end
+    
+    print("✓ Game Initialized with " .. CONFIG.VACUUM_COUNT .. " robot vacuums!")
+end
+
+-- Player support: leaderstats and spawning personal vacuum
+local Players = game:GetService("Players")
+
+local function makeLeaderstats(player)
+    local leaderstats = Instance.new("Folder")
+    leaderstats.Name = "leaderstats"
+    leaderstats.Parent = player
+
+    local score = Instance.new("IntValue")
+    score.Name = "Score"
+    score.Value = 0
+    score.Parent = leaderstats
+end
+
+Players.PlayerAdded:Connect(function(player)
+    makeLeaderstats(player)
+
+    -- Spawn a player-controlled vacuum for them
+    local spawnPos = Vector3.new(math.random(-40, 40), 1, math.random(-40, 40))
+    local vacuum = VacuumRobot.new("PlayerVacuum_" .. player.UserId, "Bright blue", spawnPos)
+    vacuum.owner = player
+    table.insert(GameManager.vacuums, vacuum)
+
+    -- Notify client to start its local UI
+    ScoreUpdate:FireClient(player, vacuum.score)
+end)
+
+-- Handle client control requests centrally (fallback)
+VacuumControl.OnServerEvent:Connect(function(player, moveVector)
+    -- find player's vacuum and set direction
+    for _, v in ipairs(GameManager.vacuums) do
+        if v.owner == player then
+            if typeof(moveVector) == "Vector3" and moveVector.Magnitude > 0 then
+                v.direction = CFrame.new(v.body.Position, v.body.Position + moveVector.Unit)
+            end
+            break
+        end
+    end
+end)
+
+-- POWER-UPS: Spawn occasional power-ups that give speed or battery
+local function spawnPowerup(position, ptype)
+    local p = Instance.new("Part")
+    p.Name = "Powerup"
+    p.Size = Vector3.new(2, 0.6, 2)
+    p.Position = position
+    p.Anchored = true
+    p.BrickColor = BrickColor.new(ptype == "Speed" and "Bright yellow" or "Lime green")
+    p.Parent = game.Workspace
+    p:SetAttribute("Type", ptype)
+
+    p.Touched:Connect(function(hit)
+        local model = hit:FindFirstAncestorOfClass("Model")
+        if not model then return end
+        local ownerVacuum
+        for _, v in ipairs(GameManager.vacuums) do
+            if v.model == model then
+                ownerVacuum = v
+                break
+            end
+        end
+        if ownerVacuum then
+            if p:GetAttribute("Type") == "Speed" then
+                spawn(function()
+                    local prevSpeed = CONFIG.VACUUM_SPEED
+                    CONFIG.VACUUM_SPEED = CONFIG.VACUUM_SPEED * 1.8
+                    task.wait(8)
+                    CONFIG.VACUUM_SPEED = prevSpeed
+                end)
+            else
+                ownerVacuum.battery = math.min(ownerVacuum.maxBattery, ownerVacuum.battery + 40)
+            end
+            p:Destroy()
+        end
+    end)
+end
+
+-- periodic power-up spawner
+task.spawn(function()
+    while GameManager.gameActive do
+        task.wait(20)
+        local pos = Vector3.new(math.random(-halfArena + 5, halfArena - 5), 1.5, math.random(-halfArena + 5, halfArena - 5))
+        spawnPowerup(pos, (math.random() > 0.5) and "Speed" or "Battery")
+    end
+end)
+
+function GameManager:updateGameTime()
+    while self.gameActive and self.gameTime > 0 do
+        task.wait(1)
+        self.gameTime = self.gameTime - 1
+        
+        if self.gameTime % 30 == 0 then
+            self:broadcastStats()
+        end
+    end
+    
+    self:endGame()
+end
+
+function GameManager:broadcastStats()
+    print("\n" .. string.rep("=", 50))
+    print("TIME REMAINING: " .. self.gameTime .. "s")
+    for _, vacuum in ipairs(self.vacuums) do
+        print(vacuum.name .. " | Score: " .. vacuum.score .. 
+              " | Dust: " .. vacuum.dustCleaned .. 
+              " | Battery: " .. string.format("%.1f", vacuum.battery) .. "%")
+    end
+    print(string.rep("=", 50) .. "\n")
+end
+
+function GameManager:endGame()
+    self.gameActive = false
+    
+    for _, vacuum in ipairs(self.vacuums) do
+        vacuum.isActive = false
+    end
+    
+    print("\n" .. string.rep("=", 60))
+    print("GAME OVER! - FINAL RESULTS")
+    print(string.rep("=", 60))
+    
+    table.sort(self.vacuums, function(a, b)
+        return a.score > b.score
+    end)
+    
+    for i, vacuum in ipairs(self.vacuums) do
+        print(i .. ". " .. vacuum.name .. 
+              " - Score: " .. vacuum.score .. 
+              " - Dust Cleaned: " .. vacuum.dustCleaned)
+    end
+    
+    print(string.rep("=", 60) .. "\n")
+end
+
+-- ========================================
+-- START GAME
+-- ========================================
+GameManager:initialize()
+task.spawn(function()
+    GameManager:updateGameTime()
+end)
+
+print("🤖 ROBOT VACUUM CLEANER GAME STARTED! 🤖")
