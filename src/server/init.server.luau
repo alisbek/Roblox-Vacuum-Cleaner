@@ -35,6 +35,10 @@ local ScoreUpdate = RemoteFolder:FindFirstChild("ScoreUpdate") or Instance.new("
 ScoreUpdate.Name = "ScoreUpdate"
 ScoreUpdate.Parent = RemoteFolder
 
+local RespawnEvent = RemoteFolder:FindFirstChild("RespawnEvent") or Instance.new("RemoteEvent")
+RespawnEvent.Name = "RespawnEvent"
+RespawnEvent.Parent = RemoteFolder
+
 
 -- ========================================
 -- SETUP: Clear and Create Arena
@@ -205,6 +209,8 @@ function VacuumRobot:createModel()
     weld.Part0 = ring
     weld.Part1 = self.body
     weld.Parent = ring
+    -- store battery as attribute on model for client polling
+    self.model:SetAttribute("Battery", self.battery)
 end
 
 function VacuumRobot:initializePhysics()
@@ -224,6 +230,13 @@ function VacuumRobot:initializePhysics()
     -- Collision detection
     self.body.Touched:Connect(function(hit)
         self:onTouched(hit)
+    end)
+    -- update model attribute periodically
+    task.spawn(function()
+        while self.model and self.model.Parent do
+            self.model:SetAttribute("Battery", math.floor(self.battery))
+            task.wait(0.5)
+        end
     end)
 
     -- If this vacuum is player-controlled, listen for control updates
@@ -287,10 +300,20 @@ function VacuumRobot:startAI()
         -- Battery drain
         self.battery = math.max(0, self.battery - 0.02)
         
-        -- If battery dead, stop
+        -- If battery dead, stop and schedule respawn
         if self.battery <= 0 then
             self.bodyVelocity.Velocity = Vector3.new(0, 0, 0)
-            continue
+            self.isActive = false
+            -- notify owner to show respawn countdown
+            if self.owner then
+                RespawnEvent:FireClient(self.owner, 5) -- 5 second respawn
+            end
+            -- respawn after delay
+            task.spawn(function()
+                task.wait(5)
+                self:respawn()
+            end)
+            return
         end
         
         -- Random turning behavior
@@ -330,6 +353,22 @@ function VacuumRobot:findNearestDust()
     end
     
     return nearestDust
+end
+
+function VacuumRobot:respawn()
+    -- Reset state and place at random spawn
+    local spawnPos = Vector3.new(math.random(-halfArena + 5, halfArena - 5), 1, math.random(-halfArena + 5, halfArena - 5))
+    if self.body and self.body.Parent then
+        self.body.CFrame = CFrame.new(spawnPos + Vector3.new(0, 1, 0))
+    end
+    self.battery = self.maxBattery
+    self.isActive = true
+    self.direction = CFrame.new()
+    self.lastTurnTime = tick()
+    -- Restart AI loop
+    task.spawn(function()
+        self:startAI()
+    end)
 end
 
 -- ========================================
